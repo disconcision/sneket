@@ -50,52 +50,7 @@ def foo(a, b, *c):
   (define python-sample
     "def foo(a, b, *c):\n   y = a + (b - c)\n   return y\n")
 
-  (check-equal? (string->implicit-sexpr (python->json python-sample))
-                '(Module
-                  (FunctionDef
-                   (Assign
-                    (Name "y")
-                    (BinOp (BinOp (Name "c")
-                                  (Name "b")
-                                  (Sub))
-                           (Name "a")
-                           (Add)))
-                   (Return (Name "y"))
-                   "foo"
-                   (arguments (arg "a")
-                              (arg "b")
-                              (arg "c")))))
-
-  #| reduced sexpr-AST.
-     here, field names are ommitted.
-     note that some nodes have bad default ordering. |#
-  
-  (check-equal? (string->implicit-sexpr sample-json)
-                '(Module
-                  (FunctionDef
-                   (Assign
-                    (Name "y")
-                    (BinOp (BinOp (Name "c")
-                                  (Name "b")
-                                  (Sub))
-                           (Name "a")
-                           (Add)))
-                   (Return (Name "y"))
-                   "foo"
-                   (arguments (arg "a")
-                              (arg "b")
-                              (arg "c")))))
-  
-  #| note the ambiguity induced for the final argument,
-     (arg "c") which should be a vararg. actually, this
-     is a bug due to premature splicing, see next:
-
-     and also that the function body is getting spliced
-     in with the rest of the fields (BUG! FIX THIS!) |#
-
-  
   #| full sexpr-AST with field names |#
-  
   (check-equal? (string->explicit-sexpr sample-json)
                 '(Module
                   (body
@@ -118,6 +73,49 @@ def foo(a, b, *c):
                       (args (arg (arg "a"))
                             (arg (arg "b")))
                       (vararg (arg (arg "c")))))))))
+
+  #| reduced sexpr-AST.
+     here, field names are ommitted.
+     note that some nodes have bad default ordering. |#
+  
+  (check-equal? (string->implicit-sexpr sample-json)
+                '(Module
+                  (FunctionDef
+                   "foo"
+                   (arguments ((arg "a")
+                               (arg "b"))
+                              (arg "c"))
+                   ((Assign
+                     (Name "y")
+                     (BinOp (Add)
+                            (Name "a")
+                            (BinOp (Sub)
+                                   (Name "b")
+                                   (Name "c"))))
+                    (Return (Name "y"))))))
+
+  
+  #| reduced version but with system call
+     to generate json. only tested in linux |#
+
+  (check-equal? (string->implicit-sexpr (python->json python-sample))
+                '(Module
+                  (FunctionDef
+                   "foo"
+                   (arguments ((arg "a")
+                               (arg "b"))
+                              (arg "c"))
+                   ((Assign
+                     (Name "y")
+                     (BinOp (Add)
+                            (Name "a")
+                            (BinOp (Sub)
+                                   (Name "b")
+                                   (Name "c"))))
+                    (Return (Name "y"))))))
+
+  
+  #| pretty-print test using explicit form  |#  
   
   (check-equal? (render (string->explicit-sexpr sample-json))
                 "def foo(a, b, *c):\n   y = (a + (b - c))\n   return y\n"))
@@ -130,11 +128,11 @@ def foo(a, b, *c):
   (define parser-path
     "python python-parse-to-json/parse_python_to_json.py")
   (first (string-split
-   (with-output-to-string
-       (λ ()
-         (system
-              (string-append parser-path " '" str "'"))))
-   "\n")))
+          (with-output-to-string
+            (λ ()
+              (system
+               (string-append parser-path " '" str "'"))))
+          "\n")))
 
 
 #| filter-fields : [symbols] → (jsexpr → jsexpr)
@@ -210,6 +208,31 @@ def foo(a, b, *c):
      `(,(string->symbol t) ,@the-rest)]))
 
 
+#| reorder-some-nodes : sexpr → sexpr
+     This is an ad-hoc reordering of fields
+     for some node types to permit unambiguous
+     elision of field-names |#
+
+(define (reorder-some-nodes stx)
+  (match stx
+    [`(BinOp (right ,a)
+             (left ,b)
+             (op ,c))
+     (reorder-some-nodes `(BinOp (op ,c)
+                                 (left ,b)
+                                 (right ,a)))]
+    [`(FunctionDef
+       (body ,a ...)
+       (name ,b)
+       (args ,c))
+     (reorder-some-nodes `(FunctionDef
+                           (name ,b)
+                           (args ,c)
+                           (body ,@a)))]
+    [(? list?) (map reorder-some-nodes stx)]
+    [_ stx]))
+
+
 #| implicitize-fields : sexpr → sexpr
      Simplifies the presentation by omitting
      field names. we'd want to establish a
@@ -220,15 +243,17 @@ def foo(a, b, *c):
     [`(,form-name (,field-names
                    ,(app implicitize-fields fields) ...)
                   ...)
-     `(,form-name ,@(apply append fields))]
-    ; mysterious fallthough case
-    [_ stx]))
+     #| this is kind of a discount way on handling multi-node fields |#
+     `(,form-name ,@(for/list ([f fields])
+                      (if (equal? 1 (length f)) (first f) f)))]
+    [(? string?) stx]))
 
 
 #| putting it all together |#
 
 (define string->implicit-sexpr
   (compose implicitize-fields
+           reorder-some-nodes
            hash->sexpr
            filter-fields-risky
            filter-fields-safe
